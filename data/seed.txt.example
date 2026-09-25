@@ -1,0 +1,3 @@
+# Replace this file with data/seed.txt containing ONLY your integer seed, e.g.:
+#   python tools/make_seed.py CO2011-261-L-2252107 > data/seed.txt
+# (nothing is handed out; you generate it from your exact team ID)

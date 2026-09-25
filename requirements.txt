@@ -1,0 +1,10 @@
+# CO2011 SEM261 IAP — pin exact versions before you submit (example baseline)
+pulp==2.8.0
+ortools==9.10.4067
+numpy==2.0.0
+pandas==2.2.2
+matplotlib==3.9.0
+streamlit==1.36.0
+python-sat==1.8.dev13
+z3-solver==4.13.0.0
+networkx==3.3
