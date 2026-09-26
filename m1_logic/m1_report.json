@@ -1,0 +1,48 @@
+{
+  "toy": {
+    "num_atoms": 4,
+    "num_requirements": 2,
+    "num_cnf_clauses": 3,
+    "sat": true,
+    "model_assign_true": [
+      [
+        "CB2",
+        "s"
+      ]
+    ]
+  },
+  "real": {
+    "num_atoms": 221,
+    "num_requirements": 1,
+    "num_cnf_clauses": 384,
+    "sat": true,
+    "model_assign_true": [
+      [
+        "CB025",
+        "20260527_5"
+      ],
+      [
+        "CB026",
+        "20260527_5"
+      ],
+      [
+        "CB027",
+        "20260527_5"
+      ],
+      [
+        "CB028",
+        "20260527_5"
+      ]
+    ]
+  },
+  "stress": {
+    "num_atoms": 7,
+    "num_requirements": 3,
+    "num_cnf_clauses": 6,
+    "sat": false,
+    "unsat_core": [
+      "Capacity: |Assign(*,20260527_5)| = 4",
+      "Availability: Busy(CB002,20260527_5) -> not Assign(CB002,20260527_5)"
+    ]
+  }
+}

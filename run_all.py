@@ -9,7 +9,7 @@ Fill in each stage to call your module code; keep the CLI and the stage order st
 This skeleton ships in the course template repository ("Use this template", not a fork).
 """
 import argparse, sys
-
+from pathlib import Path
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--seed", type=int, required=True, help="from data/seed.txt")
@@ -19,6 +19,13 @@ def main():
 
     if a.stage in ("all", "m1"):
         pass  # TODO: m1_logic  -> SAT feasibility / unsat core, logic->LP table
+        from m1_logic.m1 import run_pipeline          # <-- m1_logic.cnf -> m1_logic.m1
+        run_pipeline(
+            mode="all",
+            data=Path("data/Dataset_Anonymized_Invigilator_Assignment_Problem.xlsx"),
+            seed=a.seed,
+            json_path=Path("m1_logic/m1_report.json"),
+        )
     if a.stage in ("all", "m2"):
         pass  # TODO: m2_ilp    -> build & solve the seeded ILP, report fairness vs baseline
     if a.stage in ("all", "m3"):
