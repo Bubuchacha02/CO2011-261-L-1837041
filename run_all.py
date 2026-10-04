@@ -17,6 +17,8 @@ def main():
                     choices=["all", "m1", "m2", "m3", "m4", "m5"])
     a = ap.parse_args()
 
+    data = Path("data/Dataset_Anonymized_Invigilator_Assignment_Problem.xlsx")
+
     if a.stage in ("all", "m1"):
         pass  # TODO: m1_logic  -> SAT feasibility / unsat core, logic->LP table
         from m1_logic.m1 import run_pipeline          # <-- m1_logic.cnf -> m1_logic.m1
