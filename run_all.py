@@ -27,7 +27,12 @@ def main():
             json_path=Path("m1_logic/m1_report.json"),
         )
     if a.stage in ("all", "m2"):
-        pass  # TODO: m2_ilp    -> build & solve the seeded ILP, report fairness vs baseline
+         # m2_ilp    -> build & solve the seeded ILP, report fairness vs baseline
+        # (weights, preferences, everything random come from --seed; outputs -> m2_ilp/outputs/)
+        from m2_ilp.run_m2 import run_pipeline as run_m2
+        r = run_m2(data=data, seed=a.seed, out_dir=Path("m2_ilp/outputs"))
+        if not r.get("ok"):
+            sys.exit("[run_all] M2 checks FAILED - see the log above")
     if a.stage in ("all", "m3"):
         pass  # TODO: m3_automata-> load DFAs, product/minimization, regular->ILP, pumping
     if a.stage in ("all", "m4"):
