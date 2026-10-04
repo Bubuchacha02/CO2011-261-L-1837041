@@ -1,3 +1,46 @@
+"""
+m2_ilp/model.py  --  Module 2, requirements 2.2 - 2.5 and 2.7
+================================================================================
+2.2  DECISION VARIABLES
+    x_ij  in {0,1}     1 iff invigilator i works session j          (binary, |I|*|J|)
+    d_i   >= 0         |w_i - wbar|      L1 deviation of the load     (continuous)
+    t_max, t_min       peak / lowest load                            (continuous)
+    e^day_id >= 0      sessions of i on day d above the daily limit  (continuous)
+    e^wk_iw  >= 0      sessions of i in week w above the weekly limit(continuous)
+    w_i = sum_j x_ij   workload of i (an expression, integer at every feasible point)
+
+    d, t, e are continuous on purpose: at an optimum they take integer values
+    anyway, and keeping them continuous keeps the branching on x only.
+
+2.3  OBJECTIVE      min  Z = w_fair * F  +  w_fat * T  +  w_loc * L      (w1, w2, w3 of the seed)
+    F  fairness surrogate (linear, so the model stays an ILP -- not an MIQP):
+         "l1"      F = sum_i d_i              d_i >= w_i - wbar,  d_i >= wbar - w_i
+                   (wbar = sum_j cap_j / |I| is a CONSTANT because the total number of
+                    assignments is fixed by the capacities)
+         "minmax"  F = t_max + eps*sum d_i    t_max >= w_i  for all i
+         "spread"  F = t_max - t_min + eps*sum d_i
+    L  location penalty   L = #{(i,j): x_ij = 1 and campus(j) != preferred(i)}
+    T  fatigue penalty    T = sum e^day + sum e^wk
+
+2.4  HARD constraints   built by Module 1's  logic_to_lp():
+    R3 capacity      sum_i x_ij = cap_j
+    R1 no double-booking   x_ij + x_ik <= 1     for every Overlap(j,k)
+    R2 availability  x_ij = 0                   for every Busy(i,j)
+
+2.5  SOFT constraints   (penalised, never forbidden)
+    location  : the simulated preference of each invigilator (near_c1 / near_c2 / balanced)
+    fatigue   : e^day_id >= sum_{j in day d} x_ij - K_day     (K_day  = 2)
+                e^wk_iw  >= sum_{j in week w} x_ij - K_week   (K_week = 8)
+
+VALID INEQUALITY ("chord cut", optional, on by default)
+    w_i is an integer, so |w_i - wbar| can be replaced by its integer hull.  With
+    a = floor(wbar), f = wbar - a  (0 < f < 1):
+            d_i  >=  f + (w_i - a) * (1 - 2 f)
+    is valid for every integer w_i (it passes through the two integer points around
+    wbar) and lifts the LP bound of the fairness term from 0 to its integer minimum.
+    It removes no integer solution, only fractional ones  ->  smaller B&B tree.
+================================================================================
+"""
 from __future__ import annotations
 
 import math
