@@ -1,3 +1,45 @@
+"""
+m2_ilp/data.py  --  Module 2, requirements 2.1 (parameters) and 2.6 (preprocessing)
+================================================================================
+Reads Dataset_Anonymized_Invigilator_Assignment_Problem.xlsx and produces ONE
+object, `IAPInstance`, holding every set and parameter of the ILP.
+
+SETS
+    I   invigilators           73 ids  CB001..CB073   (everyone in the file)
+    J   SESSIONS               a session = (shift id, campus)  e.g. 20260601_2_CS2
+        The file gives, for the same time slot, different headcounts on the two
+        campuses (Co so 1 = LTK, Co so 2 = Di An), so each (slot, campus) is its
+        own room-group that must be staffed.  Sessions of the same slot on
+        different campuses overlap in time  ->  nobody can be in both.
+
+PARAMETERS
+    cap_j          required headcount = #rows of that (shift, campus) in the file
+                   (all roles CBCT / Thu ky / Truong HD are counted together,
+                   exactly as Module 1 does)
+    start_j,end_j  real start time + duration (150 min)
+    Overlap(j,k)   real predicate from the intervals
+    Busy(i,j)      DATA-DERIVED availability  (see `availability` below)
+    baseline       the schedule in the file  (the thing to beat)
+
+WHAT IS REAL AND WHAT IS SIMULATED   (declared assumptions, see ASSUMPTIONS)
+    real       : sets, capacities, times, campuses, baseline, presence per day
+    imputed    : 28 rows have an empty 'Co so' -> campus taken from the role
+                 prefix (LTK_* = Co so 1, DiAn_* = Co so 2); the prefix is 100 %
+                 consistent with the campus column on the other 741 rows
+    simulated  : location preference of each invigilator (3 categories),
+                 soft-constraint weights (3 values in [0.5, 2.0])  -- both from
+                 the team seed, as required by the brief.
+
+AVAILABILITY  (the dataset has no calendar, only realised assignments)
+    mode "day"  (default)  Busy(i,j) <=> i has NO baseline row on the date of j.
+                           Reading: someone who appears on a date is at the
+                           Faculty that day; someone who never appears that day
+                           is treated as busy / on leave.  The baseline is then
+                           feasible by construction, so the model is never
+                           infeasible because of data.
+    mode "week"            present on some day of the same ISO week  (relaxation)
+    mode "all"             nobody busy                                (relaxation)
+"""
 from __future__ import annotations
 
 import datetime as dt
