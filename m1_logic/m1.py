@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-m1_logic/cnf.py
+m1_logic/m1.py
 ================================================================================
 CO2011 - Mathematical Modeling, Semester 261 (2026-2027) - HCMUT
 Invigilator Assignment Problem (IAP) - Module 1, Requirement 1.2
@@ -68,11 +68,12 @@ USAGE
 --------------------------------------------------------------------------------
     pip install python-sat openpyxl --break-system-packages
 
-    python cnf.py                                  # runs all 3 scenarios
-    python cnf.py --mode toy
-    python cnf.py --mode real   --data ../data/Dataset_Anonymized_Invigilator_Assignment_Problem.xlsx
-    python cnf.py --mode stress --data ../data/Dataset_Anonymized_Invigilator_Assignment_Problem.xlsx
-    python cnf.py --mode all --json out.json        # also dump a machine-readable report
+    python m1.py                                  # runs all 3 scenarios
+    python m1.py --mode toy
+    python m1.py --mode real   --data ../data/Dataset_Anonymized_Invigilator_Assignment_Problem.xlsx
+    python m1.py --mode stress --data ../data/Dataset_Anonymized_Invigilator_Assignment_Problem.xlsx
+    python m1.py --mode all --json out.json        # also dump a machine-readable report
+    python m1.py --mode bridge --seed <seed>       # S1.3: logic -> LP bridge + SAT/LP cross-check
 
 --------------------------------------------------------------------------------
 DEPENDENCIES
@@ -457,7 +458,7 @@ def scenario_stress(ds: Dataset, target_shift: str, seed: Optional[int] = None) 
     # picked deterministically from the team seed (tools/make_seed.py) when one
     # is given, so every team's own run reproduces exactly, while different
     # teams get a different (but still reproducible) shortage scenario. With no
-    # seed (e.g. ad-hoc `python cnf.py`), fall back to a fixed, order-based pick.
+    # seed (e.g. ad-hoc `python m1.py`), fall back to a fixed, order-based pick.
     if seed is not None:
         rng = random.Random(seed)
         simulated_available = sorted(rng.sample(real_pool, k=n_available))
@@ -481,6 +482,212 @@ def scenario_stress(ds: Dataset, target_shift: str, seed: Optional[int] = None) 
     report(f"SCENARIO: stress test (shift {target_shift}, simulated shortage)", result)
     return result
 
+
+
+# ================================================================================
+# 6b. LOGIC -> LP BRIDGE (S1.3)  --  the hand-off from Module 1 to Module 2
+# ================================================================================
+#
+#   Translation table (each CNF clause becomes ONE linear (in)equality over 0/1
+#   variables x_ij  =  [Assign(i,j)]):
+#
+#     clause / rule                              linear form
+#     -----------------------------------------  --------------------------------
+#     positive clause  (a v b v ...)             x_a + x_b + ...            >= 1
+#     negative clause  (-a v -b v ...)           x_a + x_b + ...            <= k-1
+#     mixed clause     (a v -b)                  x_a - x_b                  >= 1-1
+#     R2 Availability   Busy(i,j) -> -Assign     x_ij                       <= 0
+#     R1 No-double-book -(Ai_j & Ai_k)           x_ij + x_ik                <= 1
+#     R3 Capacity       |Assign(*,j)| = cap(j)   sum_i x_ij                 == cap(j)
+#
+#   R3 is a cardinality / pseudo-Boolean constraint: ONE equation here, but
+#   C(n, cap+1) + C(n, n-cap+1) clauses if written in pure CNF without auxiliary
+#   variables (see Appendix A, Module 1, Q1).
+#
+#   Module 2 calls  logic_to_lp(instance)  and gets back a pulp.LpProblem that
+#   already contains every HARD rule and NO objective; it then adds the
+#   objective, the soft constraints and the fairness variables on top.
+# ================================================================================
+
+@dataclass
+class LogicInstance:
+    """
+    Finite grounding of the Module-1 predicates -- the CONTRACT between M1 and M2.
+
+        invigilators : the set I
+        shifts       : the set J (any hashable-as-string ids; M2 uses sessions)
+        capacity     : cap(j) for every j that must be staffed
+        busy         : {(i, j)}                 -- Busy(i, j)
+        overlaps     : {frozenset({j, k})}      -- Overlap(j, k) (symmetric, irreflexive)
+    """
+    invigilators: List[str]
+    shifts: List[str]
+    capacity: Dict[str, int]
+    busy: set = field(default_factory=set)
+    overlaps: set = field(default_factory=set)
+    name: str = "IAP_hard_rules"
+
+
+def clause_to_linear(clause, x):
+    """
+    One CNF clause -> one linear constraint over 0/1 variables.
+
+    clause : list of (atom, is_positive);  atom is a key of `x` (here (i, j)).
+    A clause is satisfied iff  sum_{pos} x + sum_{neg} (1 - x) >= 1,
+    i.e.       sum_{pos} x - sum_{neg} x  >=  1 - |neg|.
+    (The all-negative case is printed in its natural "at most" form.)
+    """
+    import pulp
+    pos = [x[a] for a, s in clause if s]
+    neg = [x[a] for a, s in clause if not s]
+    if not pos:
+        return pulp.lpSum(neg) <= len(neg) - 1
+    return pulp.lpSum(pos) - pulp.lpSum(neg) >= 1 - len(neg)
+
+
+def cardinality_to_linear(atoms, cap, x):
+    """`exactly cap of these atoms are true`  ->  one equation (pseudo-Boolean)."""
+    import pulp
+    return pulp.lpSum(x[a] for a in atoms) == cap
+
+
+def logic_to_lp(instance: LogicInstance, name: Optional[str] = None):
+    """
+    Logic -> LP.   Ground R1/R2/R3 over `instance` and return a pulp.LpProblem
+    holding ONLY the hard rules (no objective yet).
+
+    Extra attributes attached to the returned problem, for Module 2:
+        prob.assign_vars   {(i, j): LpVariable}  binary  x_ij = Assign(i, j)
+        prob.rule_counts   {"R1": .., "R2": .., "R3": ..}  #constraints per rule
+        prob.logic_instance  the LogicInstance it was built from
+    """
+    import pulp
+    prob = pulp.LpProblem(name or instance.name, pulp.LpMinimize)
+    x = {(i, j): pulp.LpVariable(f"x_{i}_{j}", cat=pulp.LpBinary)
+         for i in instance.invigilators for j in instance.shifts}
+    counts = {"R1": 0, "R2": 0, "R3": 0}
+
+    # R2  Busy(i,j) -> -Assign(i,j)          clause (-a)          =>  x_ij <= 0
+    for (i, j) in sorted(instance.busy):
+        if (i, j) in x:
+            prob += clause_to_linear([((i, j), False)], x), f"R2_avail_{i}_{j}"
+            counts["R2"] += 1
+
+    # R1  Overlap(j,k) & Assign(i,j) -> -Assign(i,k)   clause (-a_ij v -a_ik)
+    #                                                  =>  x_ij + x_ik <= 1
+    for pair in sorted(tuple(sorted(p)) for p in instance.overlaps):
+        j, k = pair
+        if j == k or j not in instance.shifts or k not in instance.shifts:
+            continue
+        for i in instance.invigilators:
+            prob += (clause_to_linear([((i, j), False), ((i, k), False)], x),
+                     f"R1_nodbl_{i}_{j}_{k}")
+            counts["R1"] += 1
+
+    # R3  cardinality   sum_i Assign(i,j) = cap(j)   =>  sum_i x_ij == cap(j)
+    for j in instance.shifts:
+        if j in instance.capacity:
+            prob += (cardinality_to_linear([(i, j) for i in instance.invigilators],
+                                           instance.capacity[j], x), f"R3_cap_{j}")
+            counts["R3"] += 1
+
+    prob.assign_vars = x
+    prob.rule_counts = counts
+    prob.logic_instance = instance
+    return prob
+
+
+def _pick_lp_solver():
+    """First available MILP solver known to PuLP (CBC, then HiGHS, then whatever exists)."""
+    import pulp
+    avail = pulp.listSolvers(onlyAvailable=True)
+    for nm in ("PULP_CBC_CMD", "HiGHS", "HiGHS_CMD", "SCIP_PY", "GLPK_CMD"):
+        if nm in avail:
+            return pulp.getSolver(nm, msg=False)
+    return pulp.getSolver(avail[0], msg=False)
+
+
+def logic_instance_toy() -> LogicInstance:
+    """Same instance as scenario_toy(): {CB1, CB2}, one shift needing 1, CB1 busy."""
+    return LogicInstance(["CB1", "CB2"], ["s"], {"s": 1}, busy={("CB1", "s")}, name="toy")
+
+
+def logic_instance_real(ds: "Dataset", target_shift: str, window_days: int = 7) -> LogicInstance:
+    """Same slice as scenario_real(), expressed as a LogicInstance."""
+    shift = ds.shifts[target_shift]
+    candidates = ds.candidate_pool(shift.date - dt.timedelta(days=window_days), shift.date)
+    busy = {(i, target_shift) for i in candidates if ds.is_really_busy(i, target_shift) is not None}
+    overlapping = [k for k in ds.shifts if ds.overlaps(target_shift, k)]
+    return LogicInstance(candidates, [target_shift] + overlapping,
+                         {target_shift: shift.capacity}, busy=busy,
+                         overlaps={frozenset((target_shift, k)) for k in overlapping},
+                         name=f"real_{target_shift}")
+
+
+def logic_instance_stress(ds: "Dataset", target_shift: str, seed: Optional[int] = None) -> LogicInstance:
+    """Same (simulated-shortage) slice as scenario_stress(); identical seeded pick."""
+    shift = ds.shifts[target_shift]
+    cap = shift.capacity
+    real_pool = sorted(shift.baseline_assigned)
+    n_available = max(cap - 2, 0)
+    if seed is not None:
+        simulated_available = sorted(random.Random(seed).sample(real_pool, k=n_available))
+    else:
+        simulated_available = real_pool[:n_available]
+    busy = {(i, target_shift) for i in real_pool if i not in simulated_available}
+    return LogicInstance(real_pool, [target_shift], {target_shift: cap}, busy=busy,
+                         name=f"stress_{target_shift}")
+
+
+def _bridge_check(label: str, inst: LogicInstance, sat_result: dict, show_rows: int = 6) -> dict:
+    """Build the LP from `inst`, solve it, and cross-check against the SAT verdict."""
+    import pulp
+    prob = logic_to_lp(inst)
+    hr(f"BRIDGE {label}: logic -> LP", "=")
+    print(f"variables x_ij : {len(prob.assign_vars)}   constraints : {len(prob.constraints)}   "
+          f"per rule : {prob.rule_counts}")
+    for cname, c in list(prob.constraints.items())[:show_rows]:
+        print(f"    {cname:<44s} {c}")
+    if len(prob.constraints) > show_rows:
+        print(f"    ... ({len(prob.constraints) - show_rows} more)")
+
+    status = pulp.LpStatus[prob.solve(_pick_lp_solver())]
+    lp_feasible = status == "Optimal"
+    out = {"lp_status": status, "lp_feasible": lp_feasible, "sat": sat_result["sat"],
+           "agree": lp_feasible == sat_result["sat"],
+           "variables": len(prob.assign_vars), "constraints": len(prob.constraints),
+           "rule_counts": prob.rule_counts}
+    print(f"SAT verdict = {sat_result['sat']}   |   LP status = {status}   ->   "
+          f"{'MATCH' if out['agree'] else 'MISMATCH'}")
+
+    # Model transfer: the SAT model must satisfy every generated linear constraint.
+    if sat_result["sat"]:
+        true_atoms = set(sat_result["model_assign_true"])
+        for (i, j), v in prob.assign_vars.items():
+            v.varValue = 1.0 if (i, j) in true_atoms else 0.0
+        out["sat_model_satisfies_lp"] = all(c.valid(1e-9) for c in prob.constraints.values())
+        print(f"SAT model satisfies all generated linear constraints: "
+              f"{out['sat_model_satisfies_lp']}")
+    return out
+
+
+def scenario_bridge(data: Path = DEFAULT_DATA_PATH, shift: Optional[str] = None,
+                    seed: Optional[int] = None) -> dict:
+    """S1.3: for toy / real / stress, check  SAT(CNF)  <=>  feasible(LP from logic_to_lp)."""
+    results = {"toy": _bridge_check("toy", logic_instance_toy(), scenario_toy(), show_rows=10)}
+    if not Path(data).exists():
+        print(f"ERROR: dataset not found at {data}. Pass --data <path>.", file=sys.stderr)
+        sys.exit(1)
+    ds = Dataset(data)
+    sid = shift or pick_demo_shift(ds)
+    results["real"] = _bridge_check("real", logic_instance_real(ds, sid), scenario_real(ds, sid))
+    results["stress"] = _bridge_check("stress", logic_instance_stress(ds, sid, seed),
+                                      scenario_stress(ds, sid, seed=seed))
+    hr("BRIDGE SUMMARY", "=")
+    for k, r in results.items():
+        print(f"  {k:<7s}: SAT={r['sat']!s:<5}  LP={r['lp_status']:<10}  "
+              f"{'MATCH' if r['agree'] else 'MISMATCH'}")
+    return results
 
 # ================================================================================
 # 7. CLI
@@ -520,6 +727,9 @@ def run_pipeline(
 
     Returns the same `all_results` dict that used to be built inline in main().
     """
+    if mode == "bridge":               # S1.3 -- additive; 'all' is unchanged
+        return {"bridge": scenario_bridge(data=data, shift=shift, seed=seed)}
+
     all_results = {}
 
     if mode in ("toy", "all"):
@@ -551,7 +761,7 @@ def run_pipeline(
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Module 1.2 - CNF encoding & SAT for the IAP")
-    ap.add_argument("--mode", choices=["toy", "real", "stress", "all"], default="all")
+    ap.add_argument("--mode", choices=["toy", "real", "stress", "all", "bridge"], default="all")
     ap.add_argument("--data", type=Path, default=DEFAULT_DATA_PATH,
                      help="path to Dataset_Anonymized_Invigilator_Assignment_Problem.xlsx")
     ap.add_argument("--shift", type=str, default=None,
