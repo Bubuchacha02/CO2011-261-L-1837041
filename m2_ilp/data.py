@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 m2_ilp/data.py  --  Module 2, requirements 2.1 (parameters) and 2.6 (preprocessing)
 ================================================================================
@@ -31,15 +33,18 @@ WHAT IS REAL AND WHAT IS SIMULATED   (declared assumptions, see ASSUMPTIONS)
                  the team seed, as required by the brief.
 
 AVAILABILITY  (the dataset has no calendar, only realised assignments)
-    mode "day"  (default)  Busy(i,j) <=> i has NO baseline row on the date of j.
-                           Reading: someone who appears on a date is at the
-                           Faculty that day; someone who never appears that day
-                           is treated as busy / on leave.  The baseline is then
-                           feasible by construction, so the model is never
-                           infeasible because of data.
-    mode "week"            present on some day of the same ISO week  (relaxation)
-    mode "all"             nobody busy                                (relaxation)
+    "explicit"  Busy(i,j) comes from a list of (invigilator, SHIFT id) pairs:
+                  - passed in by the caller (this is what the unit test does), or
+                  - SIMULATED from the seed (default for the real run): each pair that is
+                    NOT in the baseline is busy with probability `avail_rate` (0.20).
+                    Baseline pairs are never busy, so the baseline stays a feasible
+                    witness and the model is never infeasible because of the simulation.
+                A busy pair at shift level applies to every campus-session of that shift.
+    "day"       legacy: Busy(i,j) <=> i has no baseline row on the date of j
+    "week"      legacy relaxation: present on some day of the same ISO week
+    "all"       relaxation: nobody busy
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -111,6 +116,7 @@ class IAPInstance:
     seed: Optional[int]
     availability_mode: str = "day"
     busy: Set[Tuple[str, str]] = field(default_factory=set)
+    explicit_busy: Set[Tuple[str, str]] = field(default_factory=set)   # (invigilator, shift_id)
     fatigue_day: int = FATIGUE_DAY_LIMIT
     fatigue_week: int = FATIGUE_WEEK_LIMIT
     notes: Dict[str, object] = field(default_factory=dict)
@@ -156,6 +162,7 @@ class IAPInstance:
                           baseline={(i, j) for (i, j) in self.baseline if j in sess},
                           pref=self.pref, weights=self.weights, seed=self.seed,
                           availability_mode=self.availability_mode,
+                          explicit_busy=self.explicit_busy,
                           fatigue_day=self.fatigue_day, fatigue_week=self.fatigue_week,
                           notes=self.notes)
         new.busy = compute_busy(new, new.availability_mode)
@@ -173,6 +180,11 @@ class IAPInstance:
 def compute_busy(inst: IAPInstance, mode: str) -> Set[Tuple[str, str]]:
     if mode == "all":
         return set()
+    if mode == "explicit":
+        by_shift: Dict[str, List[str]] = defaultdict(list)
+        for j, s in inst.sessions.items():
+            by_shift[s.shift_id].append(j)
+        return {(i, j) for (i, sid) in inst.explicit_busy for j in by_shift.get(sid, ())}
     busy = set()
     weeks_present: Dict[str, Set[int]] = {
         i: {d.isocalendar()[1] for d in days} for i, days in inst.present_days.items()}
@@ -225,7 +237,7 @@ def resolve_weights(seed: Optional[int], team_id: Optional[str] = None,
     """
     if override is not None:
         w = tuple(float(v) for v in override)
-        src = "command-line override (NOT the official weights)"
+        src = "explicit weights passed in (command line / function argument)"
     else:
         if seed is None:
             raise ValueError("a seed is required (pass --seed or create data/seed.txt)")
@@ -252,26 +264,61 @@ def _parse_gio(gio: str) -> Tuple[int, int]:
     return int(h), int(m)
 
 
+DEFAULT_AVAIL_RATE = 0.20
+
+
+def simulate_availabilities(invigilators: List[str], shift_ids, baseline_shift_pairs,
+                            seed: Optional[int], rate: float = DEFAULT_AVAIL_RATE) -> List[Tuple[str, str]]:
+    """
+    SIMULATED busy pairs (invigilator, shift_id), reproducible from the seed.
+    Every pair NOT in the baseline is busy with probability `rate`; baseline pairs never are.
+    (A random number is drawn for every pair, so the stream does not depend on the baseline.)
+    """
+    rng = random.Random(f"avail-{seed}")
+    out = []
+    for sid in sorted(shift_ids):
+        for i in sorted(invigilators):
+            r = rng.random()
+            if (i, sid) not in baseline_shift_pairs and r < rate:
+                out.append((i, sid))
+    return out
+
+
+def _read_table(path: Path) -> pd.DataFrame:
+    path = Path(path)
+    return pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_excel(path)
+
+
 def load_instance(path: Path = DEFAULT_DATA_PATH, seed: Optional[int] = None,
                   team_id: Optional[str] = None,
                   weights: Optional[Tuple[float, float, float]] = None,
-                  availability: str = "day", verbose: bool = True) -> IAPInstance:
+                  availability: str = "seeded", busy_pairs=None,
+                  avail_rate: float = DEFAULT_AVAIL_RATE, verbose: bool = True) -> IAPInstance:
+    """
+    path          .xlsx or .csv with the 9 dataset columns (read by POSITION, headers ignored)
+    weights       (w1, w2, w3) = (fairness, fatigue, location); default: official from the seed
+    busy_pairs    explicit list of (invigilator, shift_id) that are NOT available (overrides `availability`)
+    availability  "seeded" (default, simulated from the seed) | "day" | "week" | "all"
+    """
     seed = read_seed(seed)
-    df = pd.read_excel(path)                 # positional columns: robust to Vietnamese headers
-    df = df.iloc[:, :9].copy()
+    df = _read_table(path).iloc[:, :9].copy()    # positional columns: robust to Vietnamese headers
     df.columns = ["ca", "ngay", "gio", "shift", "role", "cb", "dur", "thu", "campus"]
     df = df.dropna(subset=["shift", "cb"])
+    df["ngay"] = pd.to_datetime(df["ngay"])
+    df["shift"] = df["shift"].astype(str).str.strip()
+    df["cb"] = df["cb"].astype(str).str.strip()
 
     # ---- campus: from the column, else from the role prefix ---------------------
     df["prefix"] = df["role"].astype(str).str.split("_").str[0]
     from_role = df["prefix"].map(ROLE_PREFIX_TO_CAMPUS)
     from_col = df["campus"].map(lambda v: None if pd.isna(v) else f"CS{str(v).strip()[-1]}")
     known = from_col.notna()
-    consistency = float((from_col[known] == from_role[known]).mean())
+    consistency = float((from_col[known] == from_role[known]).mean()) if known.any() else 1.0
     n_imputed = int((~known).sum())
     df["cs"] = from_col.where(known, from_role)
     if df["cs"].isna().any():
         raise ValueError("cannot determine campus for some rows")
+    df = df.drop_duplicates(subset=["shift", "cs", "cb"])
 
     # ---- sessions -----------------------------------------------------------------
     sessions: Dict[str, Session] = {}
@@ -283,8 +330,12 @@ def load_instance(path: Path = DEFAULT_DATA_PATH, seed: Optional[int] = None,
         start = dt.datetime.combine(day, dt.time(h, m))
         end = start + dt.timedelta(minutes=int(row["dur"]) if pd.notna(row["dur"]) else 150)
         period = "M" if h < 12 else ("A" if h < 18 else "N")
+        try:
+            slot = int(str(shift_id).split("_")[1])
+        except (IndexError, ValueError):
+            slot = 0
         sid = f"{shift_id}_{cs}"
-        sessions[sid] = Session(sid, shift_id, day, int(str(shift_id).split("_")[1]), period,
+        sessions[sid] = Session(sid, shift_id, day, slot, period,
                                 cs, start, end, day.isocalendar()[1], int(n))
     sessions = dict(sorted(sessions.items(), key=lambda kv: (kv[1].start, kv[1].campus)))
 
@@ -306,17 +357,32 @@ def load_instance(path: Path = DEFAULT_DATA_PATH, seed: Optional[int] = None,
         present[r.cb].add(r.ngay.date())
     invigilators = sorted(df["cb"].unique())
 
+    # ---- availability ---------------------------------------------------------------
+    explicit: Set[Tuple[str, str]] = set()
+    if busy_pairs is not None:
+        explicit = {(str(i), str(sid)) for i, sid in busy_pairs}
+        mode, avail_src = "explicit", "explicit list passed in by the caller"
+    elif availability == "seeded":
+        base_shift = {(i, sessions[j].shift_id) for (i, j) in baseline}
+        explicit = set(simulate_availabilities(invigilators, {s.shift_id for s in sessions.values()},
+                                               base_shift, seed, avail_rate))
+        mode = "explicit"
+        avail_src = (f"SIMULATED from seed {seed}: rate {avail_rate} on non-baseline "
+                     f"(invigilator, shift) pairs")
+    else:
+        mode, avail_src = availability, f"derived from baseline presence ({availability})"
+
     w, wsrc = resolve_weights(seed, team_id, weights)
     inst = IAPInstance(invigilators=invigilators, sessions=sessions, overlaps=overlaps,
                        present_days=dict(present), baseline=baseline,
                        pref=simulate_preferences(invigilators, seed), weights=w, seed=seed,
-                       availability_mode=availability)
-    inst.busy = compute_busy(inst, availability)
+                       availability_mode=mode, explicit_busy=explicit)
+    inst.busy = compute_busy(inst, mode)
     inst.notes = {"campus_imputed_rows": n_imputed,
                   "role_prefix_vs_campus_consistency": round(consistency, 4),
-                  "weights_source": wsrc, "rows": int(len(df))}
+                  "weights_source": wsrc, "availability_source": avail_src, "rows": int(len(df))}
 
-    # sanity: baseline must satisfy the hard rules it is going to be compared against
+    # sanity: per-session headcount of the baseline is the capacity
     for j, s in sessions.items():
         got = sum(1 for (i, jj) in baseline if jj == j)
         assert got == s.capacity, f"capacity mismatch on {j}"
@@ -338,7 +404,8 @@ def print_summary(inst: IAPInstance) -> None:
     print(f"horizon                  : {inst.days()[0]} .. {inst.days()[-1]}  "
           f"({len(inst.days())} days, {len(inst.weeks())} ISO weeks)")
     print(f"Overlap pairs            : {len(inst.overlaps)}")
-    print(f"availability mode        : {inst.availability_mode}   |Busy| = {len(inst.busy)} "
+    print(f"availability             : {inst.notes['availability_source']}")
+    print(f"                           |Busy| = {len(inst.busy)} "
           f"of {len(inst.invigilators) * len(inst.sessions)} (i,j) pairs")
     cats = {c: sum(1 for v in inst.pref.values() if v == c) for c in CATEGORIES}
     print(f"SIMULATED preferences    : {cats}   (seed = {inst.seed})")
@@ -366,6 +433,8 @@ def dump_parameters(inst: IAPInstance, out_dir: Path) -> None:
                    "days_present": len(inst.present_days.get(i, ()))}
                   for i in inst.invigilators]).to_csv(out_dir / "invigilators_simulated_prefs.csv",
                                                       index=False)
+    pd.DataFrame(sorted(inst.explicit_busy), columns=["invigilator_id", "shift_id"]
+                 ).to_csv(out_dir / "availabilities_busy_pairs.csv", index=False)
     (out_dir / "weights.json").write_text(json.dumps(
         {"seed": inst.seed, **inst.weights, "source": inst.notes["weights_source"],
          "mapping": {"w1": "w_fair (fairness)", "w2": "w_fat (fatigue)", "w3": "w_loc (location)"}}, indent=2), encoding="utf-8")
