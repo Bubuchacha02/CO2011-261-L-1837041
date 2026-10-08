@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 m2_ilp/run_m2.py  --  Module 2 entry point: reproduces EVERY Module-2 number.
 
@@ -14,7 +16,6 @@ Pipeline (requirement -> function)
 
 Also usable from run_all.py:   from m2_ilp.run_m2 import run_pipeline
 """
-
 
 from __future__ import annotations
 
@@ -33,7 +34,8 @@ import pandas as pd
 from m2_ilp.analysis import (compare_to_baseline, fairness_comparison, performance_study,
                              worked_example)
 from m2_ilp.counterexample import run_counterexamples
-from m2_ilp.data import DEFAULT_DATA_PATH, dump_parameters, load_instance
+from m2_ilp.data import DEFAULT_AVAIL_RATE, DEFAULT_DATA_PATH, dump_parameters, load_instance
+from m2_ilp.m2 import export_schedule_metrics
 from m2_ilp.model import evaluate, loads_of, validate_schedule
 from m2_ilp.tuning import infeasibility_demo, solve_with_tuning
 
@@ -51,20 +53,22 @@ def write_schedule(inst, assign, out_dir: Path, name: str) -> None:
 def run_pipeline(data: Path = DEFAULT_DATA_PATH, seed: Optional[int] = None,
                  team_id: Optional[str] = None,
                  weights: Optional[Tuple[float, float, float]] = None,
-                 fairness: str = "l1", availability: str = "day", time_limit: float = 120,
+                 fairness: str = "l1", availability: str = "seeded", time_limit: float = 120,
                  tighten: bool = True, out_dir: Optional[Path] = None,
-                 quick: bool = False) -> dict:
+                 quick: bool = False, avail_rate: float = DEFAULT_AVAIL_RATE,
+                 export_dir: Optional[Path] = None) -> dict:
     out_dir = Path(out_dir or ROOT / "m2_ilp" / "outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
     R: dict = {}
 
     # ---- 2.1 / 2.6 -----------------------------------------------------------------
-    inst = load_instance(data, seed, team_id, weights, availability)
+    inst = load_instance(data, seed, team_id, weights, availability, None, avail_rate)
     dump_parameters(inst, out_dir)
     R["instance"] = {"invigilators": len(inst.invigilators), "sessions": len(inst.sessions),
                      "assignments": inst.total_demand, "mean_load": inst.mean_load,
                      "overlap_pairs": len(inst.overlaps), "busy_pairs": len(inst.busy),
-                     "availability": inst.availability_mode, "seed": inst.seed,
+                     "availability": inst.availability_mode,
+                     "availability_source": inst.notes["availability_source"], "seed": inst.seed,
                      "weights": inst.weights, "weights_source": inst.notes["weights_source"],
                      "weights_mapping": "w1->fairness, w2->fatigue, w3->location"}
 
@@ -99,6 +103,8 @@ def run_pipeline(data: Path = DEFAULT_DATA_PATH, seed: Optional[int] = None,
     print(f"          model objective == independent evaluation: "
           f"{R['objective_matches_independent_evaluation']}")
 
+    R["export"] = export_schedule_metrics(inst, res.assignment, export_dir or Path("m2_ilp"))
+    print(f"          grader files m2_ilp/schedule.csv + metrics.json : {R['export']}")
     write_schedule(inst, res.assignment, out_dir, "schedule_optimized.csv")
     write_schedule(inst, inst.baseline, out_dir, "schedule_baseline.csv")
     res.model.prob.writeLP(str(out_dir / "model.lp"))
@@ -155,14 +161,19 @@ def main() -> None:
     ap.add_argument("--weights", type=float, nargs=3, metavar=("W1_FAIR", "W2_FAT", "W3_LOC"),
                     default=None, help="override the 3 weights, in seed order w1 w2 w3 = fairness fatigue location")
     ap.add_argument("--fairness", choices=["l1", "minmax", "spread"], default="l1")
-    ap.add_argument("--availability", choices=["day", "week", "all"], default="day")
+    ap.add_argument("--availability", choices=["seeded", "day", "week", "all"], default="seeded",
+                    help="seeded = simulated busy pairs from the seed (default)")
+    ap.add_argument("--avail-rate", type=float, default=DEFAULT_AVAIL_RATE,
+                    help="probability that a non-baseline (invigilator, shift) pair is busy")
+    ap.add_argument("--export-dir", type=Path, default=None, help="where schedule.csv/metrics.json go (default m2_ilp/)")
     ap.add_argument("--time-limit", type=float, default=120)
     ap.add_argument("--no-tighten", action="store_true", help="disable the chord cut")
     ap.add_argument("--out-dir", type=Path, default=None)
     ap.add_argument("--quick", action="store_true", help="skip performance / fairness-mode studies")
     a = ap.parse_args()
     R = run_pipeline(a.data, a.seed, a.team_id, tuple(a.weights) if a.weights else None,
-                     a.fairness, a.availability, a.time_limit, not a.no_tighten, a.out_dir, a.quick)
+                     a.fairness, a.availability, a.time_limit, not a.no_tighten, a.out_dir, a.quick,
+                     a.avail_rate, a.export_dir)
     sys.exit(0 if R.get("ok") else 1)
 
 
