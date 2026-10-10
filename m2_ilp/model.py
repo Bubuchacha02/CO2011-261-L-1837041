@@ -41,6 +41,7 @@ VALID INEQUALITY ("chord cut", optional, on by default)
     It removes no integer solution, only fractional ones  ->  smaller B&B tree.
 ================================================================================
 """
+
 from __future__ import annotations
 
 import math
@@ -71,10 +72,18 @@ class Model:
 # ------------------------------------------------------------------------------
 def build_model(inst: IAPInstance, fairness: str = "l1",
                 weights: Optional[Dict[str, float]] = None, tighten: bool = True,
-                name: str = "IAP_M2", relax_binary: bool = False) -> Model:
+                name: str = "IAP_M2", relax_binary: bool = False,
+                peak_cap: Optional[int] = None, eps: float = EPS,
+                tmax_integer: bool = True) -> Model:
     """
     HARD rules come from Module 1 (`logic_to_lp`), then this function adds the
     fairness variables, the soft constraints and the objective.
+
+    peak_cap      if given, adds the HARD constraint  w_i <= peak_cap  for every i
+                  ("peak load first": used after min_peak_load(), see tuning.py)
+    eps           tie-break weight of sum d_i inside the minmax / spread surrogates
+    tmax_integer  declare t_max / t_min integer (valid: loads are integers; ignored in the LP
+                  relaxation) -> the solver rounds the bound 10.53 up to 11 at the root
 
     relax_binary=True builds the LP relaxation (x in [0,1]); it is used ONLY by the
     counter-example study (2.10) and for the root-gap report (2.9).
@@ -97,6 +106,9 @@ def build_model(inst: IAPInstance, fairness: str = "l1",
 
     load = {i: pulp.lpSum(x[i, j] for j in J) for i in I}
     wbar = inst.mean_load
+    if peak_cap is not None:
+        for i in I:
+            prob += load[i] <= peak_cap, f"P_peak_{i}"
 
     # ---- fairness -------------------------------------------------------------------
     d = {i: pulp.LpVariable(f"d_{i}", lowBound=0) for i in I}
@@ -115,16 +127,17 @@ def build_model(inst: IAPInstance, fairness: str = "l1",
     if fairness == "l1":
         F = L1
     else:
-        tmax = pulp.LpVariable("t_max", lowBound=0)
+        int_cat = pulp.LpInteger if (tmax_integer and not relax_binary) else pulp.LpContinuous
+        tmax = pulp.LpVariable("t_max", lowBound=0, cat=int_cat)
         for i in I:
             prob += tmax >= load[i], f"F_max_{i}"
         if fairness == "minmax":
-            F = tmax + EPS * L1
+            F = tmax + eps * L1
         else:
-            tmin = pulp.LpVariable("t_min", lowBound=0)
+            tmin = pulp.LpVariable("t_min", lowBound=0, cat=int_cat)
             for i in I:
                 prob += tmin <= load[i], f"F_min_{i}"
-            F = tmax - tmin + EPS * L1
+            F = tmax - tmin + eps * L1
 
     # ---- soft: location ---------------------------------------------------------------
     L = pulp.lpSum(x[i, j] for i in I for j in J
