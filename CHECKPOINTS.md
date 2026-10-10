@@ -8,3 +8,7 @@
 # week-04 
 -progress: 
 - <2412041> finished task 2.1 - 2.6 module 2
+# week-05
+-progress:
+<2412041> commit change in 2.1 - 2.6 module 2
+date: 10/10 

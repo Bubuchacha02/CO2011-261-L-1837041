@@ -1,2 +1,3 @@
 # Design decisions (your own words)
 Record, per module, WHY you chose each objective, constraint, DFA, and dynamical direction, and what you rejected.
+ở module 2 availability được giả lập từ seed vì dữ liệu không có lịch rảnh, tỉ lệ bận 0.20 là lựa chọn của nhóm, và cặp trong baseline không bao giờ bận để baseline vẫn khả thi và đã cân nhắc nhưng không chọn (suy ra "vắng trong ngày thì bận" từ baseline) vì dựa theo stress test ở module 1 được sinh ra từ seed nên sẽ tiếp tục dùng seed để sinh availabilities
